@@ -1,0 +1,182 @@
+@import url('https://fonts.googleapis.com/css2?family=Chivo:wght@400;500;600;700;900&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+    /* TradeSignal Dark Terminal palette */
+    --ts-bg: #0A0A0C;
+    --ts-surface: #121215;
+    --ts-surface-hover: #1A1A1F;
+    --ts-surface-active: #232329;
+    --ts-text-primary: #F8F9FA;
+    --ts-text-secondary: #A1A1AA;
+    --ts-text-tertiary: #71717A;
+    --ts-text-disabled: #52525B;
+    --ts-border: #27272A;
+    --ts-focus: #00E5FF;
+    --ts-long: #00E676;
+    --ts-long-bg: rgba(0, 230, 118, 0.10);
+    --ts-long-border: rgba(0, 230, 118, 0.28);
+    --ts-short: #FF3B30;
+    --ts-short-bg: rgba(255, 59, 48, 0.10);
+    --ts-short-border: rgba(255, 59, 48, 0.28);
+    --ts-neutral-bg: rgba(161, 161, 170, 0.10);
+}
+
+@layer base {
+    :root {
+        --background: 240 6% 4%;
+        --foreground: 210 20% 98%;
+        --card: 240 6% 7%;
+        --card-foreground: 210 20% 98%;
+        --popover: 240 6% 7%;
+        --popover-foreground: 210 20% 98%;
+        --primary: 187 100% 50%;
+        --primary-foreground: 0 0% 5%;
+        --secondary: 240 5% 10%;
+        --secondary-foreground: 210 20% 98%;
+        --muted: 240 5% 10%;
+        --muted-foreground: 240 5% 65%;
+        --accent: 240 5% 12%;
+        --accent-foreground: 210 20% 98%;
+        --destructive: 3 100% 59%;
+        --destructive-foreground: 210 20% 98%;
+        --border: 240 6% 15%;
+        --input: 240 6% 15%;
+        --ring: 187 100% 50%;
+        --radius: 0.125rem;
+        --chart-1: 152 100% 45%;
+        --chart-2: 3 100% 59%;
+        --chart-3: 187 100% 50%;
+        --chart-4: 45 100% 55%;
+        --chart-5: 280 60% 65%;
+    }
+}
+
+@layer base {
+    * { @apply border-border; }
+    html, body {
+        background: var(--ts-bg);
+        color: var(--ts-text-primary);
+        font-family: 'IBM Plex Sans', system-ui, sans-serif;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+    }
+    body { margin: 0; }
+    h1, h2, h3, h4 { font-family: 'Chivo', sans-serif; letter-spacing: -0.01em; }
+    code, .font-mono { font-family: 'IBM Plex Mono', ui-monospace, monospace; }
+
+    ::selection { background: rgba(0, 229, 255, 0.28); color: #fff; }
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-track { background: var(--ts-bg); }
+    ::-webkit-scrollbar-thumb { background: #27272A; border-radius: 2px; }
+    ::-webkit-scrollbar-thumb:hover { background: #3f3f46; }
+}
+
+@layer components {
+    .ts-surface { background: var(--ts-surface); border: 1px solid var(--ts-border); }
+    .ts-hover:hover { background: var(--ts-surface-hover); }
+    .ts-label { font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ts-text-secondary); }
+    .ts-divider { border-top: 1px solid var(--ts-border); }
+
+    .ts-badge-long {
+        display: inline-flex; align-items: center;
+        padding: 2px 8px; font-size: 10px; font-weight: 700;
+        letter-spacing: 0.12em; text-transform: uppercase;
+        color: var(--ts-long); background: var(--ts-long-bg);
+        border: 1px solid var(--ts-long-border); border-radius: 2px;
+        font-family: 'IBM Plex Mono', monospace;
+    }
+    .ts-badge-short {
+        display: inline-flex; align-items: center;
+        padding: 2px 8px; font-size: 10px; font-weight: 700;
+        letter-spacing: 0.12em; text-transform: uppercase;
+        color: var(--ts-short); background: var(--ts-short-bg);
+        border: 1px solid var(--ts-short-border); border-radius: 2px;
+        font-family: 'IBM Plex Mono', monospace;
+    }
+    .ts-badge-neutral {
+        display: inline-flex; align-items: center;
+        padding: 2px 8px; font-size: 10px; font-weight: 700;
+        letter-spacing: 0.12em; text-transform: uppercase;
+        color: var(--ts-text-secondary); background: var(--ts-neutral-bg);
+        border: 1px solid var(--ts-border); border-radius: 2px;
+        font-family: 'IBM Plex Mono', monospace;
+    }
+
+    .ts-pill {
+        display: inline-flex; align-items: center; gap: 6px;
+        padding: 4px 10px; border: 1px solid var(--ts-border);
+        border-radius: 999px; font-size: 11px; color: var(--ts-text-secondary);
+        background: var(--ts-surface);
+    }
+
+    .ts-nav-link {
+        display: flex; align-items: center; gap: 10px;
+        padding: 10px 14px; color: var(--ts-text-secondary);
+        border-left: 2px solid transparent;
+        text-transform: uppercase; letter-spacing: 0.08em; font-size: 11px;
+        font-weight: 500;
+        transition: color 150ms ease, background 150ms ease, border-color 150ms ease;
+    }
+    .ts-nav-link:hover { color: var(--ts-text-primary); background: var(--ts-surface-hover); }
+    .ts-nav-link.active {
+        color: var(--ts-focus); background: var(--ts-surface);
+        border-left-color: var(--ts-focus);
+    }
+
+    .ts-btn-primary {
+        display: inline-flex; align-items: center; gap: 8px;
+        background: var(--ts-focus); color: #000; font-weight: 600;
+        padding: 8px 16px; border-radius: 2px; font-size: 12px;
+        text-transform: uppercase; letter-spacing: 0.1em;
+        transition: opacity 150ms ease;
+    }
+    .ts-btn-primary:hover { opacity: 0.9; }
+    .ts-btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .ts-btn-ghost {
+        display: inline-flex; align-items: center; gap: 8px;
+        background: transparent; color: var(--ts-text-primary);
+        border: 1px solid var(--ts-border);
+        padding: 8px 16px; border-radius: 2px; font-size: 12px;
+        text-transform: uppercase; letter-spacing: 0.1em;
+        transition: background 150ms ease;
+    }
+    .ts-btn-ghost:hover { background: var(--ts-surface-hover); }
+
+    .ts-table th {
+        text-align: left; text-transform: uppercase; letter-spacing: 0.12em;
+        font-size: 10px; color: var(--ts-text-secondary);
+        padding: 8px 12px; border-bottom: 2px solid var(--ts-border);
+        font-weight: 500;
+    }
+    .ts-table td { padding: 10px 12px; border-bottom: 1px solid var(--ts-border); font-size: 13px; }
+    .ts-table tr:hover td { background: var(--ts-surface-hover); }
+
+    .ts-live-dot {
+        display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+        background: var(--ts-long); box-shadow: 0 0 0 4px rgba(0,230,118,0.15);
+        animation: ts-pulse 1.6s ease-in-out infinite;
+    }
+    .ts-live-dot.off { background: var(--ts-text-tertiary); box-shadow: none; animation: none; }
+    @keyframes ts-pulse { 0%,100% { opacity: 1;} 50% { opacity: 0.4; } }
+
+    .ts-grid-bg {
+        background-image:
+            linear-gradient(rgba(255,255,255,0.02) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(255,255,255,0.02) 1px, transparent 1px);
+        background-size: 32px 32px;
+    }
+}
+
+/* fade-in for signal cards */
+.ts-fadein {
+    animation: tsFadeIn 240ms ease-out both;
+}
+@keyframes tsFadeIn {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: translateY(0); }
+}

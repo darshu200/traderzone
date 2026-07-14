@@ -1,0 +1,2 @@
+/* App-specific overrides. Keep minimal — most styling in index.css */
+.App { min-height: 100vh; background: var(--ts-bg); color: var(--ts-text-primary); }

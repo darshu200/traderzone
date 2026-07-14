@@ -1,0 +1,33 @@
+{
+  "summary": "Forex extension of TradeSignal fully validated. Backend: 23/23 pytest cases passed (market status now returns equity_open=false + forex_open=true correctly; /api/instruments returns 19 with asset_class/pip_decimals/price_prefix, filterable to 12/7; /api/watchlist parallel + returns 19 by default and 7/12 when filtered — all 7 forex have non-zero yfinance LTP; /api/signals?asset_class filter works; /api/analytics.by_asset_class returned + asset_class filter works; /api/backtest for EURUSD/XAUUSD/GBPUSD returns FX-OVERLAP/FX-LONDON-OPEN signals with 4-decimal entry; equity HDFCBANK regression still returns INTRADAY signals; CSV includes asset_class column; stale annotation on OPEN forex >24h works; settings migration adds all 19 symbols). Frontend: all 5 pages tested with UI-seeded stale + fresh + won + lost signals. TopBar shows dual EQ CLOSED + FX OPEN pills. Live Signals watchlist filters to 7/12/19 by asset-class tabs; FX badges, 4-dec majors, 2-dec JPY/gold, $ prefix on XAUUSD confirmed. Trade Log shows Class + Type columns, stale-flag icon renders on the >24h forex row (data-testid stale-flag-<id>), tab filter narrows rows. Analytics: 'By Asset Class' section with data-testid analytics-asset-<CLASS> rows, forex filter removes EQUITY bucket. Backtest EURUSD 2026-06-10 to 2026-07-03 produced 2 signals (FX-OVERLAP + FX-LONDON-OPEN) with 4-dec entry, 50% win-rate, CSV download link populated. Settings grouped into Equity (12) + Forex (7); disable-all-forex + save + reload persists (12 active/19 total after reload).",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py backtest POST response does not include a top-level 'asset_class' field — spec asked for asset_class:'FOREX' in the response. Per-signal asset_class is present (correct), and the /backtests collection persists asset_class. Consider adding top-level 'asset_class' or nesting into 'summary' for API clarity (currently only inferrable from signals[].asset_class).",
+    "server.py backtest_csv second parameter shadow: `for s in result['signals']` reuses the same `s` name as the outer `s = datetime.fromisoformat(start_date).date()`. Works because outer `s` is no longer used, but is confusing.",
+    "server.py _annotate_stale swallows timestamp parse errors silently; consider logging so bad-format timestamps surface.",
+    "Settings 'restore forex on' from Playwright required clicking `enable-all-forex` which sits below the fold — the button has `data-testid` (good), but it's low-contrast and easy to miss. Consider a sticky Save/Restore bar so keyboard/tab users don't have to scroll.",
+    "TopBar equity pill and forex pill share the same visual style; only the label 'EQ'/'FX' differentiates. When both are open (weekday morning + late-evening) the dot color is identical — consider tinting FX pill differently for at-a-glance distinction.",
+    "AssetClassTabs uses `showAll={false}` for Backtest (correct — 'All' would be ambiguous for a single-instrument backtest). Good design choice.",
+    "Analytics page loads once per assetClass change and dumps `setData(null)` first — this causes a flash of the 'Loading…' screen. Consider keeping stale data during refetch (setData(prev => prev) or a loading overlay)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/backend_test.py"
+  ],
+  "success_rate": { "backend": "100% (23/23)", "frontend": "100% of tested flows" },
+  "test_credentials": "N/A - no auth in this app",
+  "seed_data_creation": "Inserted 4 UI seed signals via mongo for Trade Log/Analytics UI testing: UI_SEED_STALE_FX (EURUSD OPEN 48h ago -> triggers stale flag), UI_SEED_FRESH_FX (GBPUSD OPEN 3h ago, no flag), UI_SEED_EQ_WON (HDFCBANK WON +3R), UI_SEED_FX_LOST (EURUSD LOST -1R). All cleaned up after test. Backend pytest also seeds/deletes TEST_* prefixed signals per class.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Server time IST during this run: 2026-07-04 00:47-00:52 (Saturday early morning). equity_open=false, forex_open=true (still within NY tail ending 02:30 IST Sat). Watchlist parallelization + TTL cache work — 19-instrument fetch completes in ~5s cold and <1s warm. EURUSD backtest reliably produces 1-4 signals in the 2026-06-10 to 2026-07-03 window with 3.0 RR threshold. yfinance forex data available and stable. If retesting past 02:30 IST Sat, both equity and forex will be CLOSED (weekend); to test forex during open hours, use Mon-Fri 03:30-Sat 02:30 IST. Settings enable-all/disable-all buttons work but are below-the-fold on 1080p viewport — playwright tests must scroll_into_view_if_needed before clicking.",
+  "rca of the issue": "N/A - no bugs found. All 23 backend tests and all 5 frontend page flows (Live Signals, Trade Log, Analytics, Backtest, Settings) passed on first meaningful attempt. Two intermediate playwright hiccups were test-script issues (CSS uppercase transform on inner_text assertion; below-the-fold click without scroll) and have been documented for the next agent, not app bugs."
+}

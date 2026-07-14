@@ -1,0 +1,123 @@
+{
+  "theme": "Dark",
+  "archetype": "4 (Swiss & High-Contrast) - Trading Terminal Variant",
+  "brand_name": "TradeSignal",
+  "design_philosophy": "Bloomberg-terminal energy. Maximum data density, pure function-first execution. Muted dark surfaces with accents strictly reserved for semantic financial meaning (Gains = Green, Losses = Red). High contrast, precise, objective.",
+  "colors": {
+    "background": {
+      "default": "#0A0A0C",
+      "surface": "#121215",
+      "surface_hover": "#1A1A1F",
+      "surface_active": "#232329"
+    },
+    "text": {
+      "primary": "#F8F9FA",
+      "secondary": "#A1A1AA",
+      "tertiary": "#71717A",
+      "disabled": "#52525B"
+    },
+    "border": {
+      "default": "#27272A",
+      "focus": "#00E5FF"
+    },
+    "semantic": {
+      "long_gain": "#00E676",
+      "long_gain_bg": "rgba(0, 230, 118, 0.1)",
+      "short_loss": "#FF3B30",
+      "short_loss_bg": "rgba(255, 59, 48, 0.1)",
+      "breakeven": "#A1A1AA",
+      "breakeven_bg": "rgba(161, 161, 170, 0.1)",
+      "brand_action": "#00E5FF"
+    }
+  },
+  "typography": {
+    "font_families": {
+      "heading": "Chivo, sans-serif",
+      "body": "IBM Plex Sans, sans-serif",
+      "monospace": "IBM Plex Mono, monospace"
+    },
+    "rules": {
+      "headings": "Chivo, font-weight 700, tight tracking (tracking-tight), never centered for data views.",
+      "body": "IBM Plex Sans, font-weight 400 or 500, leading-relaxed for reading, leading-snug for data rows.",
+      "numbers": "CRITICAL: ALL prices, percentages, timestamps, and RR ratios MUST use IBM Plex Mono (font-mono) to ensure tabular alignment and precise scanability."
+    },
+    "scales": {
+      "h1": "text-2xl sm:text-3xl tracking-tight",
+      "h2": "text-xl sm:text-2xl tracking-tight",
+      "h3": "text-lg sm:text-xl",
+      "body": "text-sm",
+      "data_large": "text-xl font-mono",
+      "data_medium": "text-sm font-mono",
+      "label": "text-xs uppercase tracking-widest text-secondary"
+    }
+  },
+  "spacing_and_layout": {
+    "density": "Dense. Use tighter padding (p-3, p-4) to maximize visible data on a single screen without scrolling.",
+    "grid_strategy": "Control Room Grid. Strict grid-cols-12 hierarchy. Watchlist (col-span-3 or 4), Main Content/Charts (col-span-8 or 9).",
+    "surfaces": "Cardless design. Flat rectangular areas delineated by 1px borders (border-border). No drop shadows, use background lightness steps instead.",
+    "alignment": "All textual data left-aligned. All numerical data (prices, %) right-aligned for easy vertical scanning."
+  },
+  "components": {
+    "buttons": {
+      "primary": "Flat solid background (brand_action #00E5FF), text-black, rounded-none or rounded-sm, hover:opacity-90.",
+      "secondary": "Transparent background, 1px border border-border, text-primary, hover:bg-surface_hover."
+    },
+    "badges": {
+      "long": "text-xs font-bold px-2 py-1 bg-[rgba(0,230,118,0.1)] text-[#00E676] border border-[rgba(0,230,118,0.2)] rounded-sm uppercase tracking-wider",
+      "short": "text-xs font-bold px-2 py-1 bg-[rgba(255,59,48,0.1)] text-[#FF3B30] border border-[rgba(255,59,48,0.2)] rounded-sm uppercase tracking-wider",
+      "neutral": "text-xs font-bold px-2 py-1 bg-surface_active text-secondary rounded-sm uppercase tracking-wider"
+    },
+    "tables": {
+      "style": "border-collapse, dense rows (py-2), subtle border-b border-border on rows, hover:bg-surface_hover.",
+      "headers": "text-xs uppercase text-secondary font-medium pb-2 border-b-2 border-border"
+    },
+    "cards_signals": {
+      "style": "p-4 border border-border bg-surface hover:border-secondary transition-colors rounded-sm flex flex-col gap-3",
+      "data_rows": "flex justify-between items-center text-sm border-b border-border/50 pb-1 last:border-0"
+    }
+  },
+  "motion": {
+    "interactions": "Minimal and instantaneous. 150ms transitions on hovers. No bouncy animations.",
+    "data_updates": "When LTP or signals change, implement a subtle background flash (green for uptick, red for downtick) that fades out over 500ms."
+  },
+  "testing_attributes": {
+    "rule": "CRITICAL: All interactive elements MUST have data-testid attributes.",
+    "examples": [
+      "data-testid='nav-watchlist-link'",
+      "data-testid='signal-card-long'",
+      "data-testid='backtest-run-button'",
+      "data-testid='trade-log-table'"
+    ]
+  },
+  "media": {
+    "empty_states": [
+      {
+        "category": "No Signals / Empty Chart",
+        "url": "https://images.unsplash.com/photo-1745509267699-1b1db256601e?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA2MTJ8MHwxfHNlYXJjaHwyfHxhYnN0cmFjdCUyMGZpbmFuY2lhbCUyMGNoYXJ0JTIwZGFya3xlbnwwfHx8fDE3ODMxMDMzMzl8MA&ixlib=rb-4.1.0&q=85",
+        "description": "Abstract dark financial chart to be used as a low-opacity background for empty 'No live signals' state.",
+        "usage": "Apply low opacity (opacity-20) and grayscale, overlay with text 'Waiting for next setup...'."
+      },
+      {
+        "category": "Empty Trade Log",
+        "url": "https://images.unsplash.com/photo-1510519138101-570d1dca3d66?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2NzV8MHwxfHNlYXJjaHwxfHxlbXB0eSUyMGRlc2slMjBub3RlYm9vayUyMGRhcmt8ZW58MHx8fHwxNzgzMTAzMzM5fDA&ixlib=rb-4.1.0&q=85",
+        "description": "Dark empty desk setup.",
+        "usage": "Use as a small, rounded placeholder image when the Trade Log is completely empty, alongside prompt 'No trades executed yet.'."
+      }
+    ],
+    "icons": {
+      "library": "phosphor-icons/react",
+      "command": "yarn add @phosphor-icons/react",
+      "style": "Use 'regular' or 'bold' weight. Avoid duotone for data-heavy dashboard.",
+      "usage": "Use TrendUp/TrendDown for %, Crosshair for targets, ShieldCheck for Stoploss."
+    }
+  },
+  "instructions_to_main_agent": [
+    "Initialize Tailwind with the specific hex codes for background (#0A0A0C), surface (#121215), and semantic colors (#00E676, #FF3B30).",
+    "Install Google Fonts 'Chivo', 'IBM Plex Sans', and 'IBM Plex Mono'.",
+    "Ensure the layout feels like a command center: dense, screen-filling, with clear boundaries (1px borders) between widgets.",
+    "Implement the Watchlist as a sidebar or fixed grid on the left, and Signals Feed/Charts on the right.",
+    "Use semantic colors STRICTLY for meaning: Green for gains/LONG, Red for losses/SHORT. Do not use them for decorative elements.",
+    "Ensure all numerical outputs (prices, percentages, time) wrap in a component or span that uses the 'font-mono' class.",
+    "Add 'data-testid' to EVERY button, tab, and row for testing."
+  ]
+}

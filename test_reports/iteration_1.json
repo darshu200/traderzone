@@ -1,0 +1,39 @@
+{
+  "summary": "Full-stack testing of TradeSignal (NSE Indian stock technical analysis dashboard). Backend: 14/14 pytest cases passed covering market status, instruments, watchlist (with NSE + yfinance fallback), settings persistence, signals CRUD (seed → PATCH r_multiple → DELETE), analytics structure, and backtest (POST + CSV + 55-day guard + error validations). Frontend: All 5 sidebar pages navigable; Live Signals renders watchlist + market-status pill; Run Scan triggers /api/dev/run-scan and shows toast; Trade Log lists seeded signals, filter dropdowns work; Close Trade dialog updates outcome + r_multiple; Analytics KPIs and equity-curve render; Backtest for HDFCBANK (2026-06-01 to 2026-07-03) returned results and CSV Download link appeared; Settings toggle for TATASTEEL persisted after save + re-navigation. 30/30 frontend UI checks passed.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Trade Log & Close Dialog", "issues": ["Radix DialogContent missing Description/aria-describedby (a11y warning in console). Not a blocker but should be fixed for a11y."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "(Optional a11y) Add DialogDescription (or aria-describedby={undefined} suppressor) to CloseTradeDialog to silence Radix warning."
+  ],
+  "critical_code_review_comments": [
+    "server.py: Consider adding index on db.signals for (instrument, trade_date, timestamp) to speed up dedup and today-signals queries as data grows.",
+    "server.py backtest POST enforces span >55 days via (e-s).days, which for exactly 56 days is caught correctly, but the CSV route uses the same check — good consistency. Consider centralizing into a helper.",
+    "watchlist endpoint calls fetch_candles(sym, '15m', period='3d') on every request (12 network calls) which can be slow (~3-8s). Consider caching for 60s.",
+    "data_source.get_live_quote does not cache — every /api/watchlist call re-fetches all 12 NSE + yfinance quotes. Recommend a small in-memory TTL cache (30-60s) to avoid rate-limits.",
+    "CORS middleware is added AFTER app.include_router(api) — Starlette applies middleware to all routes so this still works, but ordering-before-include is conventional.",
+    "No index on db.signals.id; PATCH/DELETE by id do full scans. Add unique index on 'id'."
+  ],
+  "updated_files": [
+    "/app/backend/tests/__init__.py",
+    "/app/backend/tests/backend_test.py"
+  ],
+  "success_rate": {"backend": "100% (14/14)", "frontend": "100% (30/30 checks)"},
+  "test_credentials": "N/A - no auth in this app",
+  "seed_data_creation": "Inserted 1 UI seed signal (HDFCBANK LONG, entry 1500, sl 1490, tgt 1530) for Trade Log testing; cleaned up after test. Backend test class also seeds and deletes its own signals with TEST_/UI_SEED_ prefix.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "All flows work end-to-end. Backend running on supervisor. Server IST time was 2026-07-04 (Sat) 00:13 during testing, so market was closed — Run Scan correctly generated 0 signals via /api/dev/run-scan. HDFCBANK backtest 2026-06-01→2026-07-03 completed and CSV export works. yfinance intraday works for indices and most stocks (TATAMOTORS may be delisted per problem statement). If re-running frontend tests, seed a signal first via mongo insert or /api/dev/run-scan during market hours."
+}

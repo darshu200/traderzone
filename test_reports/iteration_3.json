@@ -1,0 +1,37 @@
+{
+  "summary": "TZ/DST-aware forex refactor validated end-to-end. Backend: 39/39 pytest cases pass (all 23 iteration-2 regressions + 14 new DST-aware helper/constant tests + 2 updated market status shape tests). New _london_session_open/_ny_session_open/_is_forex_primary_time/_is_forex_secondary_time/_is_forex_friday_cutoff/_is_forex_market_open helpers behave correctly across summer (BST/EDT) and winter (GMT/EST) — including the critical 2025-01-15 22:00 IST case which stays in overlap only because winter DST shifts NY session +1h in IST (17:30-22:30 IST winter vs 17:30-21:30 IST summer). Friday 30-min cutoff before NY 17:00 close works identically in EDT (2025-07-18 16:45) and EST (2025-01-17 16:45). Weekend rules Sat=closed / Sun<17:00 NY closed / Sun>=17:00 NY open all verified. constants.FOREX_PRIMARY_WINDOW/FOREX_SECONDARY_WINDOW/FRIDAY_CUTOFF_SAT_IST are removed; LONDON_TZ/NY_TZ/LONDON_OPEN_LOCAL/CLOSE_LOCAL/NY_OPEN_LOCAL/CLOSE_LOCAL/LONDON_OPEN_WINDOW_HOURS=2/FRIDAY_CLOSE_BUFFER_MIN=30 all present. /api/market/status now returns server_time_london/server_time_ny (tz-aware ISO), in_forex_overlap, in_forex_london_open_window, london_session_open, ny_session_open, session_forex_overlap_ist ('17:30 - 21:30 IST' at test time — summer/BST), session_forex_secondary_ist ('12:30 - 14:30 IST'), session_forex_london_local='08:00 - 17:00 Europe/London', session_forex_ny_local='08:00 - 17:00 America/New_York'. Old session_forex_overlap/session_forex_secondary keys correctly gone. Watchlist/settings/analytics/backtest regressions unchanged (19 rows, EURUSD/HDFCBANK signals with correct call_types/asset_class, by_asset_class filter). Frontend: all 5 pages load without console errors; TopBar shows both EQ CLOSED + FX OPEN pills; EmptyState on Live Signals reads status.session_forex_overlap_ist / session_forex_secondary_ist and displays '17:30 - 21:30 IST London/NY overlap' + '12:30 - 14:30 IST London open' dynamically (verified live from /api/market/status); Settings 'Strategy Parameters (read-only)' now cites 'London 08:00–17:00 Europe/London & New York 08:00–17:00 America/New_York (DST-safe; IST equivalents shift ±1h across DST transitions)' — DST note present.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py market_status: overlap boundaries are computed per-calendar-date in each session's local tz, then converted to IST. For most IST calendar days this is correct, but when London/NY sessions of the *same UTC day* span two IST calendar days (rare, e.g. IST post-midnight after Fri 17:00 NY), the 'IST session strings' shown may be the *previous* IST-day session. Not incorrect for scheduler/decision logic (helpers are still evaluated from now), but display strings may briefly show yesterday's overlap when it's just past midnight IST Sat. Consider annotating the strings with a date, or clamping to 'next active session' when currently past close.",
+    "strategy._is_forex_market_open: The 'Fri 17:00 NY close' logic tests wd==4 and t<close_t, which is correct. However, on Friday BEFORE Sunday 17:00 NY it returns True from 00:00 NY onward — this is fine because forex is genuinely open all Fri prior to close. Just call out that _forex_window() (backtest.py) is what actually gates entries into the two named windows, so leftover open-market minutes outside London/NY sessions still produce no signals (correct).",
+    "strategy._ensure_tzaware defaults naive datetimes to IST. This is safe for internal callers who always pass IST-aware datetimes from _now_ist(), but is a footgun if backtest.py ever calls with a *naive* NY-indexed pandas Timestamp. Currently _forex_window() calls ts.to_pydatetime() which preserves any tz on the Timestamp — data_source likely returns UTC-tz indices — so this is fine. Consider making _ensure_tzaware raise on naive input to prevent future silent bugs, given the whole refactor is about tz-safety.",
+    "server.py market_status: session_forex_overlap_ist can display an empty/inverted range on days where London/NY windows don't overlap in the *same calendar London-date* (e.g., extreme DST edges). Not observed today but worth guarding: if overlap_end < overlap_start, output 'closed today' instead of e.g. '21:30 - 17:30 IST'.",
+    "scheduler cron 'mon-fri 9-23 IST + sat 0-4 IST' is generous enough to cover both winter and summer DST edges. Consider adding a sun cron for 03:30 IST (Sunday 17:00 NY open in summer) → currently no scheduler tick fires between Sun 04:00 IST and Mon 09:00 IST, so the ~28h Sunday-open window has no scans."
+  ],
+  "updated_files": [
+    "/app/backend/tests/backend_test.py"
+  ],
+  "success_rate": {
+    "backend": "100% (39/39)",
+    "frontend": "100% of tested flows"
+  },
+  "test_credentials": "N/A - no auth in this app",
+  "seed_data_creation": "Test signals prefixed TEST_ inserted+cleaned per test (analytics/stale/signals-filter/patch/delete). No persistent seed left behind.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Server time IST during this run: Sat 2026-07-04 ~01:04 IST (early morning). At this moment: equity_open=false, forex_open=true (NY session still open until Fri 17:00 NY = Sat 02:30 IST since we are in BST/EDT), london_session_open=false, ny_session_open=true. session_forex_overlap_ist='17:30 - 21:30 IST', session_forex_secondary_ist='12:30 - 14:30 IST' — these are the summer/DST values matching the spec exactly. To retest the winter case live, the container would need to be at a January date; the 6 winter tz-helper pytests already assert this via constructed datetimes without needing live time travel. If the container clock rolls past Sat 02:30 IST during a rerun, forex_open will flip to false (weekend); both equity and forex pills will show CLOSED. All 4 pages Trade Log / Analytics / Backtest / Settings navigate correctly; router log warns 'No routes matched location /trade-log' briefly during hard-nav test but page still renders (likely a React Router redirect / v6 warning during hard reload; not a functional bug). Backend pytest runs in ~17s in parallel.",
+  "rca of the issue": "N/A - no bugs found. This is a correctness-fix refactor and every one of the 13 hand-picked DST datetime assertions passes (summer overlap on/off, winter overlap on/off including the DST-shifted 22:00 IST winter case that would previously have been out-of-window under a hardcoded 17:30-21:30 IST rule, first-2h London open in both DST regimes, Friday cutoff on both EDT and EST, weekend rules on Sat/Sun). The removed constants are confirmed absent; the new zoneinfo-based ones are present with correct values (Europe/London, America/New_York, 2h window, 30min buffer)."
+}
