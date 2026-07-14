@@ -37,6 +37,7 @@ grpcio-status==1.66.2
 
 boto3==1.35.23
 stripe==10.12.0
+curl_cffi==0.15.0
 
 tenacity==9.0.0
 typing_extensions>=4.12.2
