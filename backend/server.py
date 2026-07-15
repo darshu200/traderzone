@@ -890,6 +890,10 @@ async def get_rejected_signals(date: Optional[str] = None, asset_class: Optional
         "rows": rows,
     }
 
+@api.get("/health")
+async def health():
+    return {"status": "alive", "server_time_utc": datetime.now(timezone.utc).isoformat()}
+
 
 @api.post("/dev/run-scan")
 async def dev_run_scan():
