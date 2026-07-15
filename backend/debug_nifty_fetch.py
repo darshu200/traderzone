@@ -9,13 +9,13 @@ Run from the backend folder with your venv active:
 import traceback
 import yfinance as yf
 
-try:
-    from curl_cffi import requests as cffi_requests
-    session = cffi_requests.Session(impersonate="chrome")
-    print("Using curl_cffi impersonated session.\n")
-except Exception as e:
-    session = None
-    print(f"curl_cffi unavailable ({e}), using default session.\n")
+print(f"yfinance version: {yf.__version__}\n")
+print("Not building a manual curl_cffi session here — yfinance >=1.x manages "
+      "its own thread-safe curl_cffi(impersonate='chrome') session internally "
+      "when curl_cffi is installed. Passing our own used to be the recommended\n"
+      "workaround on older yfinance, but is no longer necessary and can\n"
+      "actually reintroduce the cookie/crumb bugs this script is meant to "
+      "catch.\n")
 
 TESTS = [
     ("^NSEI",       "15m", "2026-06-01", "2026-07-01"),
@@ -31,8 +31,6 @@ for ticker, interval, start, end in TESTS:
     try:
         kwargs = dict(tickers=ticker, interval=interval, progress=False,
                       auto_adjust=False, threads=False)
-        if session is not None:
-            kwargs["session"] = session
         if start and end:
             kwargs["start"] = start
             kwargs["end"] = end
@@ -56,7 +54,7 @@ for ticker, interval, start, end in TESTS:
 print("=" * 70)
 print("Also trying yf.Ticker().history() directly for ^NSEI as a second method:")
 try:
-    t = yf.Ticker("^NSEI", session=session) if session else yf.Ticker("^NSEI")
+    t = yf.Ticker("^NSEI")
     h = t.history(period="5d", interval="15m")
     if h is None or h.empty:
         print("RESULT: Ticker.history() also returned empty/None for ^NSEI")
