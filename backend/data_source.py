@@ -20,36 +20,30 @@ logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # yfinance hardening: Yahoo's "Invalid Crumb" 401 is a widespread, current
-# issue tied to their anti-scraping cookie/token check, not specific to this
-# app. curl_cffi impersonates a real browser's TLS fingerprint, which yfinance
-# officially recommends as the workaround. We build one shared session and
-# reuse it everywhere yfinance is called.
+# issue tied to their anti-scraping cookie/token check. Older yfinance
+# releases (<=0.2.6x, which this app was pinned to) do NOT share cookie/crumb
+# state safely across threads — YfData held no lock, so concurrent downloads
+# from our bounded-but-parallel scan (asyncio.to_thread fan-out) could read a
+# cookie mid-mutation and see a bare string instead of the expected object,
+# surfacing as AttributeError("'str' object has no attribute 'name'"). This
+# got worse under load (cron firing every 2 min against 30+ symbols x 3
+# intervals = dozens of concurrent calls) and on Render's shared/datacenter
+# IPs, which Yahoo rate-limits more aggressively than residential IPs.
+#
+# Fix: yfinance >=1.x made YfData a proper singleton with an internal
+# threading.Lock around all cookie/crumb reads and writes, and it now builds
+# its own curl_cffi(impersonate="chrome") session automatically whenever
+# curl_cffi is installed — which is exactly what we used to build by hand.
+# So we no longer create or inject our own session; we just let yfinance
+# manage it (see requirements.txt: yfinance>=1.5.1, curl_cffi>=0.15). We only
+# keep a small retry-with-backoff wrapper for genuinely transient failures.
 # ---------------------------------------------------------------------------
-_yf_session = None
-
-
-def _get_yf_session():
-    """Return a curl_cffi session impersonating Chrome, for yfinance calls.
-    Falls back to yfinance's default session if curl_cffi is unavailable."""
-    global _yf_session
-    if _yf_session is not None:
-        return _yf_session
-    try:
-        from curl_cffi import requests as cffi_requests
-        _yf_session = cffi_requests.Session(impersonate="chrome")
-    except Exception as e:
-        logger.warning(f"curl_cffi session unavailable, falling back to default: {e}")
-        _yf_session = None
-    return _yf_session
 
 
 def _yf_download_with_retry(*, max_attempts: int = 3, backoff_base: float = 1.5, **kwargs):
-    """Wrapper around yf.download with the curl_cffi session and retry-with-
-    backoff, since the crumb/401 error can be intermittent even after the
-    session fix."""
-    session = _get_yf_session()
-    if session is not None:
-        kwargs["session"] = session
+    """Wrapper around yf.download with retry-with-backoff for transient
+    failures (network blips, momentary rate limiting). Session/cookie/crumb
+    handling is left entirely to yfinance's own thread-safe singleton."""
     last_exc = None
     for attempt in range(1, max_attempts + 1):
         try:
