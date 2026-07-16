@@ -9,6 +9,7 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+from pymongo import ReturnDocument
 
 from capital import compute_position_sizing, compute_realized_pnl, compute_pnl_pct_of_capital
 
@@ -49,10 +50,16 @@ def create_capital_router(db, ist_now_fn) -> APIRouter:
     router = APIRouter(prefix="/capital", tags=["capital"])
 
     async def _get_settings() -> dict:
-        doc = await db.capital_settings.find_one({"_id": "singleton"})
-        if not doc:
-            await db.capital_settings.insert_one(DEFAULT_SETTINGS)
-            doc = dict(DEFAULT_SETTINGS)
+        # Atomic upsert instead of find-then-insert — avoids a race where
+        # two concurrent requests (e.g. the dashboard's parallel initial
+        # fetches) both see "no doc yet" and both try to insert, causing
+        # a DuplicateKeyError on the second one.
+        doc = await db.capital_settings.find_one_and_update(
+            {"_id": "singleton"},
+            {"$setOnInsert": DEFAULT_SETTINGS},
+            upsert=True,
+            return_document=ReturnDocument.AFTER,
+        )
         return doc
 
     @router.get("/settings")
@@ -242,3 +249,4 @@ def create_capital_router(db, ist_now_fn) -> APIRouter:
         return curve
 
     return router
+        
