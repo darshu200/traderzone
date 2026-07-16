@@ -445,4 +445,544 @@ async def _auto_close_open_signals():
                     last_close = float(df5_future["Close"].iloc[-1])
                     risk = abs(doc["entry"] - doc["stoploss"])
                     if risk > 0:
-                       
+                        r_mult = round((last_close - doc["entry"]) / risk, 2) if doc["direction"] == "LONG" \
+                            else round((doc["entry"] - last_close) / risk, 2)
+                    else:
+                        r_mult = 0.0
+                    outcome = "WON" if r_mult > 0.05 else ("LOST" if r_mult < -0.05 else "BREAKEVEN")
+                    await db.signals.update_one(
+                        {"id": doc["id"]},
+                        {"$set": {
+                            "outcome": outcome, "exit_price": last_close, "r_multiple": r_mult,
+                            "closed_at": now.isoformat(), "auto_closed": True,
+                            "notes": f"BTST max hold ({BTST_MAX_HOLD_DAYS}d) reached — force-closed",
+                        }},
+                    )
+                    logger.info(f"BTST max-hold closed {sym} {doc['direction']}: {outcome} @ {last_close}")
+        except Exception as e:
+            logger.warning(f"Auto-close check failed for {sym}: {e}")
+
+
+@app.on_event("startup")
+async def _on_startup():
+    doc = await db.settings.find_one({"_id": "singleton"})
+    if not doc:
+        await db.settings.insert_one({"_id": "singleton", "active_instruments": list(ALL_SYMBOLS)})
+    else:
+        # Migration: ensure any newly-added instruments are enabled by default
+        existing = set(doc.get("active_instruments", []))
+        missing = [s for s in ALL_SYMBOLS if s not in existing]
+        if missing:
+            merged = list(existing) + missing
+            await db.settings.update_one({"_id": "singleton"},
+                                         {"$set": {"active_instruments": merged}})
+    # Weekday broad scan: equity 9:15-15:30 IST + all DST-shifted forex windows
+    # (London 08:00 IST-equivalents range 12:30-13:30; overlap ends up to 22:30 IST in winter DST).
+    scheduler.add_job(
+        run_signal_scan,
+        CronTrigger(day_of_week="mon-fri", hour="9-23", minute="*/2"),
+        id="weekday_scan", replace_existing=True,
+    )
+    # Saturday early morning: NY session tail after Friday close (up to ~04:00 IST in winter DST)
+    scheduler.add_job(
+        run_signal_scan,
+        CronTrigger(day_of_week="sat", hour="0-4", minute="*/2"),
+        id="sat_forex_tail", replace_existing=True,
+    )
+    # Sunday-open covers: forex reopens Sun 17:00 America/New_York which is
+    # Mon 02:30 IST (summer/EDT) or Mon 03:30 IST (winter/EST). Only NY session
+    # is open then (no London), so live signals still won't fire — but keeping
+    # a scheduler tick alive here lets stale-flag / cache-warm logic run.
+    scheduler.add_job(
+        run_signal_scan,
+        CronTrigger(day_of_week="sun,mon", hour="2-8", minute="*/2"),
+        id="sun_open_tail", replace_existing=True,
+    )
+    # Auto-close: checks every OPEN signal against real price action and
+    # closes it the moment SL/target is actually touched, instead of
+    # relying on manual end-of-day closing.
+    scheduler.add_job(
+        _auto_close_open_signals,
+        CronTrigger(day_of_week="mon-fri", hour="9-23", minute="*/2"),
+        id="auto_close_weekday", replace_existing=True,
+    )
+    scheduler.add_job(
+        _auto_close_open_signals,
+        CronTrigger(day_of_week="sat", hour="0-4", minute="*/2"),
+        id="auto_close_sat", replace_existing=True,
+    )
+    scheduler.add_job(
+        _auto_close_open_signals,
+        CronTrigger(day_of_week="sun,mon", hour="2-8", minute="*/2"),
+        id="auto_close_sun", replace_existing=True,
+    )
+    await ensure_archive_indexes(db)
+    # Defense-in-depth: even if application-level dedup logic ever has a gap,
+    # the database itself refuses an exact duplicate (same instrument,
+    # direction, day, and entry timestamp = the same underlying setup).
+    try:
+        await db.signals.create_index(
+            [("instrument", 1), ("direction", 1), ("trade_date", 1), ("timestamp", 1)],
+            unique=True, name="uniq_signal_setup",
+        )
+    except Exception as e:
+        logger.warning(f"Could not create unique signals index (may already exist "
+                       f"with duplicates from before this fix): {e}")
+    # Daily candle archive: run once after both equity and forex sessions are
+    # done for the day, so we build our own historical dataset beyond
+    # yfinance's ~60-day intraday history limit. 23:55 IST covers equity
+    # close (15:30) and the latest forex overlap end (~22:30 in winter DST).
+    scheduler.add_job(
+        _run_daily_archive_job,
+        CronTrigger(hour=23, minute=55),
+        id="daily_candle_archive", replace_existing=True,
+    )
+    scheduler.start()
+    logger.info("Scheduler started (equity + forex windows, IST).")
+
+
+@app.on_event("shutdown")
+async def _on_shutdown():
+    try:
+        scheduler.shutdown(wait=False)
+    except Exception:
+        pass
+    client.close()
+
+
+# --------------------------- API Endpoints --------------------------- #
+
+@api.get("/")
+async def root():
+    return {"app": "TradeSignal", "status": "ok"}
+
+
+@api.get("/health")
+async def health():
+    """Dedicated keepalive endpoint for external pingers (cron-job.org,
+    UptimeRobot, etc). Deliberately does nothing except return instantly —
+    no DB call, no yfinance/NSE call, no business logic — so pinging it
+    every few minutes is free of side effects and never breaks even if
+    /market/status's response shape changes later. Purpose: stop Render's
+    free-tier web service from spinning down after 15 min of no inbound
+    traffic, which would otherwise kill the in-process APScheduler cron."""
+    return {"status": "alive", "server_time_utc": datetime.now(timezone.utc).isoformat()}
+
+
+@api.get("/market/status")
+async def market_status():
+    now = _now_ist()
+    # Compute the current-day forex session boundaries in IST for display.
+    # We use the *native* London/NY session hours as truth and convert them
+    # to IST here so the UI shows the actual DST-adjusted times.
+    now_london = now.astimezone(LONDON_TZ)
+    london_open = now_london.replace(hour=8, minute=0, second=0, microsecond=0)
+    london_close = now_london.replace(hour=17, minute=0, second=0, microsecond=0)
+    london_2h_end = london_open + timedelta(hours=2)
+    now_ny = now.astimezone(NY_TZ)
+    ny_open = now_ny.replace(hour=8, minute=0, second=0, microsecond=0)
+    ny_close = now_ny.replace(hour=17, minute=0, second=0, microsecond=0)
+    # Overlap = intersection of the two sessions on this calendar date
+    overlap_start_utc = max(london_open.astimezone(IST), ny_open.astimezone(IST))
+    overlap_end_utc = min(london_close.astimezone(IST), ny_close.astimezone(IST))
+
+    def _fmt(dt):
+        return dt.astimezone(IST).strftime("%H:%M")
+
+    return {
+        "server_time_ist": now.isoformat(),
+        "server_time_london": now_london.isoformat(),
+        "server_time_ny": now_ny.isoformat(),
+        "equity_open": _is_equity_market_open(now),
+        "forex_open": _is_forex_market_open(now),
+        "is_open": _is_equity_market_open(now) or _is_forex_market_open(now),
+        "in_forex_overlap": _is_forex_primary_time(now),
+        "in_forex_london_open_window": _is_forex_secondary_time(now),
+        "london_session_open": _london_session_open(now),
+        "ny_session_open": _ny_session_open(now),
+        "session_equity": "09:15 - 15:30 IST",
+        # Dynamic IST windows, derived from London/NY local time (DST-safe):
+        "session_forex_overlap_ist": f"{_fmt(overlap_start_utc)} - {_fmt(overlap_end_utc)} IST",
+        "session_forex_secondary_ist": f"{_fmt(london_open)} - {_fmt(london_2h_end)} IST",
+        "session_forex_london_local": "08:00 - 17:00 Europe/London",
+        "session_forex_ny_local": "08:00 - 17:00 America/New_York",
+        "last_scan": _last_scan_report,
+    }
+
+
+@api.get("/instruments")
+async def list_instruments(asset_class: Optional[str] = None):
+    items = [
+        {"symbol": s, **{k: v for k, v in m.items() if k != "yf"}}
+        for s, m in INSTRUMENTS.items()
+    ]
+    if asset_class in ("EQUITY", "FOREX"):
+        items = [i for i in items if i["asset_class"] == asset_class]
+    return items
+
+
+@api.get("/watchlist")
+async def watchlist(asset_class: Optional[str] = None):
+    """Reads the cache populated by run_signal_scan's tick (via
+    _refresh_watchlist_cache) — a plain Mongo lookup, no live NSE/yfinance
+    calls in the request path. Data is at most ~2 min old, which is already
+    the system's own update cadence everywhere else, so this adds no real
+    staleness — it just stops re-fetching 74 symbols live on every page
+    view/refresh, which is what was causing multi-minute dashboard loads."""
+    active = await _get_active_symbols(asset_class=asset_class)
+    if not active:
+        return []
+    cur = db.watchlist_cache.find({"_id": {"$in": active}}, {"_id": 0})
+    rows = await cur.to_list(len(active))
+    by_symbol = {r["symbol"]: r for r in rows}
+    # Preserve active-list order; symbols not yet cached (e.g. right after a
+    # fresh deploy, before the first scan tick has run) are simply omitted
+    # rather than blocking the response — they'll appear within ~2 min.
+    return [by_symbol[s] for s in active if s in by_symbol]
+
+
+@api.get("/signals")
+async def get_signals(
+    limit: int = Query(default=200, le=500),
+    date: Optional[str] = None,
+    instrument: Optional[str] = None,
+    asset_class: Optional[str] = None,
+):
+    q = {}
+    if date: q["trade_date"] = date
+    if instrument: q["instrument"] = instrument
+    if asset_class in ("EQUITY", "FOREX"): q["asset_class"] = asset_class
+    cur = db.signals.find(q, {"_id": 0}).sort("timestamp", -1).limit(limit)
+    rows = await cur.to_list(limit)
+    return [_annotate_stale(r) for r in rows]
+
+
+@api.get("/signals/today")
+async def get_today_signals(asset_class: Optional[str] = None):
+    today = _now_ist().date().isoformat()
+    # Today's signals, PLUS any still-open BTST signal from a previous day —
+    # those are active positions meant to be evaluated for exit today, not
+    # just shown on their entry day and then dropped from view.
+    q = {"$or": [
+        {"trade_date": today},
+        {"call_type": "BTST", "outcome": "OPEN"},
+    ]}
+    if asset_class in ("EQUITY", "FOREX"):
+        q = {"$and": [q, {"asset_class": asset_class}]}
+    cur = db.signals.find(q, {"_id": 0}).sort("timestamp", -1)
+    rows = await cur.to_list(500)
+    return [_annotate_stale(r) for r in rows]
+
+
+@api.patch("/signals/{sid}")
+async def update_signal(sid: str, upd: TradeUpdateModel):
+    doc = await db.signals.find_one({"id": sid})
+    if not doc:
+        raise HTTPException(404, "Signal not found")
+    r_mult = None
+    if upd.exit_price is not None and doc.get("entry") is not None and doc.get("stoploss") is not None:
+        entry = float(doc["entry"]); sl = float(doc["stoploss"])
+        risk = abs(entry - sl)
+        if risk > 0:
+            if doc["direction"] == "LONG":
+                r_mult = round((float(upd.exit_price) - entry) / risk, 2)
+            else:
+                r_mult = round((entry - float(upd.exit_price)) / risk, 2)
+    if upd.outcome == "BREAKEVEN":
+        r_mult = 0.0
+    # Guard against outcome/exit_price contradicting each other (this is
+    # exactly how a manual entry produced outcome="WON" with an exit price
+    # sitting at the stoploss before this check existed).
+    if r_mult is not None and upd.outcome in ("WON", "LOST"):
+        if upd.outcome == "WON" and r_mult < -0.05:
+            raise HTTPException(400, f"outcome='WON' but computed r_multiple={r_mult} "
+                                     f"(exit price implies a loss) — check exit_price")
+        if upd.outcome == "LOST" and r_mult > 0.05:
+            raise HTTPException(400, f"outcome='LOST' but computed r_multiple={r_mult} "
+                                     f"(exit price implies a win) — check exit_price")
+    await db.signals.update_one(
+        {"id": sid},
+        {"$set": {"outcome": upd.outcome, "exit_price": upd.exit_price,
+                  "r_multiple": r_mult, "notes": upd.notes,
+                  "closed_at": _now_ist().isoformat()}},
+    )
+    doc = await db.signals.find_one({"id": sid}, {"_id": 0})
+    return _annotate_stale(doc)
+
+
+@api.delete("/signals/{sid}")
+async def delete_signal(sid: str):
+    res = await db.signals.delete_one({"id": sid})
+    if res.deleted_count == 0:
+        raise HTTPException(404, "Signal not found")
+    return {"deleted": True}
+
+
+@api.get("/analytics")
+async def analytics(asset_class: Optional[str] = None, forward_test_only: bool = False):
+    q = {}
+    if asset_class in ("EQUITY", "FOREX"): q["asset_class"] = asset_class
+    if forward_test_only:
+        settings_doc = await db.settings.find_one({"_id": "singleton"})
+        fts = (settings_doc or {}).get("forward_test_start")
+        if fts:
+            q["timestamp"] = {"$gte": fts}
+    cur = db.signals.find(q, {"_id": 0})
+    signals = await cur.to_list(5000)
+
+    won = [s for s in signals if s.get("outcome") == "WON"]
+    lost = [s for s in signals if s.get("outcome") == "LOST"]
+    be = [s for s in signals if s.get("outcome") == "BREAKEVEN"]
+    closed = won + lost + be
+    total = len(signals)
+    win_rate = round(len(won) / len(closed) * 100, 2) if closed else 0.0
+    r_vals = [s.get("r_multiple") or 0 for s in closed]
+    avg_r = round(sum(r_vals) / len(r_vals), 2) if r_vals else 0.0
+
+    by_setup: dict = {}
+    for s in signals:
+        k = s.get("setup_type", "unknown")
+        by_setup[k] = by_setup.get(k, 0) + 1
+
+    by_instrument: dict = {}
+    for s in signals:
+        k = s.get("instrument", "unknown")
+        d = by_instrument.setdefault(k, {"total": 0, "won": 0, "lost": 0, "r": 0.0})
+        d["total"] += 1
+        if s.get("outcome") == "WON": d["won"] += 1
+        if s.get("outcome") == "LOST": d["lost"] += 1
+        if s.get("r_multiple") is not None:
+            d["r"] += float(s["r_multiple"] or 0)
+
+    # By call type — include both equity + forex labels
+    by_type: dict = {}
+    for s in signals:
+        k = s.get("call_type", "INTRADAY")
+        d = by_type.setdefault(k, {"total": 0, "won": 0, "lost": 0, "r": 0.0})
+        d["total"] += 1
+        if s.get("outcome") == "WON": d["won"] += 1
+        if s.get("outcome") == "LOST": d["lost"] += 1
+        if s.get("r_multiple") is not None:
+            d["r"] += float(s["r_multiple"] or 0)
+
+    # By asset class
+    by_asset: dict = {}
+    for s in signals:
+        k = s.get("asset_class", "EQUITY")
+        d = by_asset.setdefault(k, {"total": 0, "won": 0, "lost": 0, "r": 0.0})
+        d["total"] += 1
+        if s.get("outcome") == "WON": d["won"] += 1
+        if s.get("outcome") == "LOST": d["lost"] += 1
+        if s.get("r_multiple") is not None:
+            d["r"] += float(s["r_multiple"] or 0)
+
+    closed_sorted = sorted(closed, key=lambda x: x.get("closed_at") or x.get("timestamp") or "")
+    equity = []
+    cum = 0.0
+    for s in closed_sorted:
+        r = float(s.get("r_multiple") or 0)
+        cum += r
+        equity.append({
+            "t": s.get("closed_at") or s.get("timestamp"),
+            "cum_r": round(cum, 2),
+            "instrument": s.get("instrument"),
+            "asset_class": s.get("asset_class", "EQUITY"),
+        })
+
+    return {
+        "asset_class": asset_class or "ALL",
+        "total_signals": total,
+        "closed": len(closed), "open": total - len(closed),
+        "won": len(won), "lost": len(lost), "breakeven": len(be),
+        "win_rate": win_rate, "avg_r": avg_r,
+        "by_setup": by_setup, "by_instrument": by_instrument, "by_type": by_type,
+        "by_asset_class": by_asset,
+        "equity_curve": equity,
+    }
+
+
+@api.get("/settings")
+async def get_settings():
+    doc = await db.settings.find_one({"_id": "singleton"})
+    if not doc:
+        return {"active_instruments": list(ALL_SYMBOLS), "forward_test_start": None}
+    return {"active_instruments": doc.get("active_instruments", list(ALL_SYMBOLS)),
+            "forward_test_start": doc.get("forward_test_start")}
+
+
+@api.post("/settings/mark-forward-test-start")
+async def mark_forward_test_start():
+    """Mark 'now' as the clean forward-test start point. Signals generated
+    before this timestamp were produced during strategy tuning/iteration and
+    shouldn't be counted as an honest track record — only what's generated
+    from this point forward is a genuine, untouched paper-trading test."""
+    now_iso = _now_ist().isoformat()
+    await db.settings.update_one(
+        {"_id": "singleton"}, {"$set": {"forward_test_start": now_iso}}, upsert=True,
+    )
+    return {"forward_test_start": now_iso}
+
+
+@api.put("/settings")
+async def update_settings(s: SettingsModel):
+    filtered = [x for x in s.active_instruments if x in INSTRUMENTS]
+    await db.settings.update_one(
+        {"_id": "singleton"},
+        {"$set": {"active_instruments": filtered}},
+        upsert=True,
+    )
+    return {"active_instruments": filtered}
+
+
+@api.post("/backtest")
+async def backtest_route(req: BacktestRequest):
+    if req.instrument not in INSTRUMENTS:
+        raise HTTPException(400, "Unknown instrument")
+    try:
+        s = datetime.fromisoformat(req.start_date).date()
+        e = datetime.fromisoformat(req.end_date).date()
+    except Exception:
+        raise HTTPException(400, "Invalid date format, use YYYY-MM-DD")
+    if e < s:
+        raise HTTPException(400, "end_date must be >= start_date")
+    span = (e - s).days
+    if span > 55:
+        raise HTTPException(400, "Backtest window exceeds 55 days (yfinance intraday limit)")
+
+    result = run_backtest(req.instrument, req.start_date, req.end_date)
+    await db.backtests.insert_one({
+        "_id": str(uuid.uuid4()),
+        "instrument": req.instrument,
+        "asset_class": INSTRUMENTS[req.instrument]["asset_class"],
+        "start": req.start_date, "end": req.end_date,
+        "summary": result["summary"], "count": len(result["signals"]),
+        "created_at": _now_ist().isoformat(),
+    })
+    return result
+
+
+@api.get("/backtest/csv")
+async def backtest_csv(instrument: str, start_date: str, end_date: str):
+    if instrument not in INSTRUMENTS:
+        raise HTTPException(400, "Unknown instrument")
+    try:
+        s = datetime.fromisoformat(start_date).date()
+        e = datetime.fromisoformat(end_date).date()
+    except Exception:
+        raise HTTPException(400, "Invalid date format")
+    if (e - s).days > 55:
+        raise HTTPException(400, "Backtest window exceeds 55 days")
+    result = run_backtest(instrument, start_date, end_date)
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow([
+        "instrument", "asset_class", "direction", "setup_type", "call_type",
+        "timestamp", "entry", "stoploss", "target", "rr",
+        "outcome", "exit_price", "r_multiple",
+    ])
+    for s in result["signals"]:
+        writer.writerow([
+            s.get("instrument"), s.get("asset_class"), s.get("direction"),
+            s.get("setup_type"), s.get("call_type"),
+            s.get("timestamp"), s.get("entry"), s.get("stoploss"), s.get("target"), s.get("rr"),
+            s.get("outcome"), s.get("exit_price"), s.get("r_multiple"),
+        ])
+    buf.seek(0)
+    fname = f"backtest_{instrument}_{start_date}_{end_date}.csv"
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+@api.post("/dev/dedupe-signals")
+async def dedupe_signals():
+    """One-time cleanup: remove exact-duplicate signals (same instrument,
+    direction, trade_date, and entry timestamp) that were inserted before
+    the dedup-logic fix, so the new unique index can be created. Keeps the
+    earliest-created copy of each duplicate group."""
+    pipeline = [
+        {"$group": {
+            "_id": {"instrument": "$instrument", "direction": "$direction",
+                     "trade_date": "$trade_date", "timestamp": "$timestamp"},
+            "ids": {"$push": "$_id"}, "count": {"$sum": 1},
+        }},
+        {"$match": {"count": {"$gt": 1}}},
+    ]
+    removed = 0
+    groups = []
+    async for g in db.signals.aggregate(pipeline):
+        ids = g["ids"]
+        to_remove = ids[1:]  # keep the first, remove the rest
+        if to_remove:
+            result = await db.signals.delete_many({"_id": {"$in": to_remove}})
+            removed += result.deleted_count
+            groups.append({"key": g["_id"], "removed": result.deleted_count})
+    return {"duplicate_groups_found": len(groups), "total_removed": removed, "groups": groups}
+
+
+@api.get("/signals/rejected")
+async def get_rejected_signals(date: Optional[str] = None, asset_class: Optional[str] = None):
+    """Signals that were detected but rejected for being too stale to act
+    on (MAX_SIGNAL_STALENESS_MIN). Shows how much opportunity is being
+    missed to confirmation-chain delay + data lag, so it's an informed
+    decision rather than a guess."""
+    q = {"trade_date": date or _now_ist().date().isoformat()}
+    if asset_class in ("EQUITY", "FOREX"):
+        q["asset_class"] = asset_class
+    cur = db.rejected_signals.find(q, {"_id": 0}).sort("detected_at", -1)
+    rows = await cur.to_list(500)
+    return {
+        "count": len(rows),
+        "by_setup_type": {
+            st: sum(1 for r in rows if r.get("setup_type") == st)
+            for st in ("BOS-OB-Retest", "Liquidity-Sweep")
+        },
+        "avg_staleness_min": round(sum(r["staleness_min"] for r in rows) / len(rows), 1) if rows else 0,
+        "rows": rows,
+    }
+
+
+@api.post("/dev/run-scan")
+async def dev_run_scan():
+    """Trigger a manual scan (useful for testing / off-hours)."""
+    await run_signal_scan()
+    return {"triggered": True, "report": _last_scan_report}
+
+
+@api.post("/dev/run-archive")
+async def dev_run_archive():
+    """Trigger a manual candle-archive run right now (normally runs once
+    daily at 23:55 IST). Useful to test immediately or backfill on demand."""
+    summary = await archive_recent_candles(db)
+    return {"triggered": True, "summary": summary}
+
+
+@api.get("/dev/archive-status")
+async def dev_archive_status():
+    """Quick counts of what's in the candle_archive collection so far."""
+    total = await db.candle_archive.count_documents({})
+    pipeline = [
+        {"$group": {"_id": {"instrument": "$instrument", "interval": "$interval"},
+                     "count": {"$sum": 1},
+                     "min_ts": {"$min": "$ts"}, "max_ts": {"$max": "$ts"}}},
+        {"$sort": {"_id.instrument": 1, "_id.interval": 1}},
+    ]
+    breakdown = [
+        {"instrument": r["_id"]["instrument"], "interval": r["_id"]["interval"],
+         "count": r["count"], "from": r["min_ts"], "to": r["max_ts"]}
+        async for r in db.candle_archive.aggregate(pipeline)
+    ]
+    return {"total_rows": total, "breakdown": breakdown}
+
+
+app.include_router(api)
+app.include_router(create_capital_router(db, _now_ist), prefix="/api")
+app.add_middleware(
+    CORSMiddleware,
+    allow_credentials=True,
+    allow_origins=os.environ.get("CORS_ORIGINS", "*").split(","),
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
