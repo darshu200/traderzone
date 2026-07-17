@@ -30,8 +30,9 @@ from data_source import get_live_quote, fetch_candles
 from candle_archive import archive_recent_candles, ensure_archive_indexes
 from backtest import simulate_outcome
 from types import SimpleNamespace
-from capital import compute_real_rr_at_detection, check_already_invalid
-from capital_routes import create_capital_router
+from capital import (compute_real_rr_at_detection, check_already_invalid,
+                     compute_position_sizing, compute_realized_pnl, compute_pnl_pct_of_capital)
+from capital_routes import create_capital_router, DEFAULT_SETTINGS
 from strategy import (
     scan_live_signal, signal_to_dict, _daily_bias, _is_forex_market_open,
     _is_forex_primary_time, _is_forex_secondary_time,
@@ -136,6 +137,95 @@ def _quick_bias(sym: str) -> str:
 
 
 _SCAN_CONCURRENCY = asyncio.Semaphore(8)  # bounded — avoids hammering NSE/yfinance
+
+
+async def _get_capital_settings() -> dict:
+    doc = await db.capital_settings.find_one({"_id": "singleton"})
+    if not doc:
+        await db.capital_settings.insert_one(DEFAULT_SETTINGS)
+        doc = dict(DEFAULT_SETTINGS)
+    return doc
+
+
+async def _auto_open_real_trade(sig_d: dict, signal_id: str):
+    """Automatically records a real_trades entry the moment a signal is
+    accepted — no manual 'take trade' click. Mirrors take_trade() in
+    capital_routes.py exactly (same sizing math, same fields) so Capital &
+    P&L behaves identically to the manual flow, just triggered by the
+    signal engine itself instead of a button press. If sizing comes back
+    with quantity 0 (insufficient capital/margin), we still skip — a 0-share
+    trade isn't a real trade and would just corrupt daily-pnl aggregates."""
+    try:
+        settings = await _get_capital_settings()
+        dashboard_price = sig_d.get("dashboard_price") or sig_d.get("entry")
+        sizing = compute_position_sizing(
+            capital=settings["current_capital"],
+            risk_per_trade_pct=settings["risk_per_trade_pct"],
+            dashboard_price=dashboard_price,
+            stoploss=sig_d["stoploss"], target=sig_d["target"], direction=sig_d["direction"],
+            call_type=sig_d.get("call_type", "INTRADAY"),
+            intraday_leverage=settings["intraday_leverage"],
+            btst_leverage=settings["btst_leverage"],
+        )
+        if sizing["quantity"] <= 0:
+            logger.info(f"Skipping auto real-trade for {sig_d['instrument']}: "
+                        f"sized quantity is 0 (insufficient capital/margin)")
+            return
+        now = _now_ist()
+        trade_doc = {
+            "id": str(uuid.uuid4()), "signal_id": signal_id,
+            "instrument": sig_d["instrument"], "direction": sig_d["direction"],
+            "setup_type": sig_d.get("setup_type"), "call_type": sig_d.get("call_type"),
+            "rr_tier": sig_d.get("rr_tier"),
+            "theoretical_entry": sig_d["entry"], "stoploss": sig_d["stoploss"], "target": sig_d["target"],
+            "dashboard_price": dashboard_price,
+            "real_rr_at_detection": sizing["real_rr_at_detection"],
+            "already_invalid_at_detection": sizing["already_invalid_at_detection"],
+            "risk_amount": sizing["risk_amount"], "stop_distance": sizing["stop_distance"],
+            "leverage_used": sizing["leverage_used"],
+            "quantity": sizing["quantity"], "capital_required": sizing["capital_required"],
+            "actual_entry_price": dashboard_price,
+            "status": "OPEN", "actual_exit_price": None,
+            "realized_pnl_rupees": None, "realized_pnl_pct_capital": None,
+            "capital_at_time_of_trade": settings["current_capital"],
+            "trade_date": sig_d.get("trade_date"),
+            "opened_at": now.isoformat(), "closed_at": None,
+            "auto_opened": True, "notes": "",
+        }
+        await db.real_trades.insert_one(trade_doc)
+        logger.info(f"Auto-opened real trade: {sig_d['instrument']} {sig_d['direction']} "
+                    f"qty={sizing['quantity']} @ {dashboard_price}")
+    except Exception as e:
+        logger.warning(f"Auto-open real trade failed for {sig_d.get('instrument')}: {e}")
+
+
+async def _auto_close_real_trade(signal_id: str, exit_price: float, closed_at_iso: str, notes: str = ""):
+    """Closes the matching real_trades entry (if one was auto-opened for
+    this signal) the moment the signal engine itself closes — same
+    SL/target/EOD/BTST-max-hold triggers, same exit price. If no matching
+    OPEN real trade exists (e.g. quantity was 0 at open time, or this
+    signal predates the auto-tracking feature), this is a silent no-op."""
+    try:
+        trade = await db.real_trades.find_one({"signal_id": signal_id, "status": "OPEN"})
+        if not trade:
+            return
+        pnl = compute_realized_pnl(trade["quantity"], trade["actual_entry_price"], exit_price, trade["direction"])
+        pnl_pct = compute_pnl_pct_of_capital(pnl, trade["capital_at_time_of_trade"])
+        settings = await _get_capital_settings()
+        new_capital = round(settings["current_capital"] + pnl, 2)
+        await db.capital_settings.update_one({"_id": "singleton"}, {"$set": {"current_capital": new_capital}})
+        await db.real_trades.update_one(
+            {"id": trade["id"]},
+            {"$set": {
+                "status": "CLOSED", "actual_exit_price": exit_price,
+                "realized_pnl_rupees": pnl, "realized_pnl_pct_capital": pnl_pct,
+                "closed_at": closed_at_iso, "notes": notes,
+            }},
+        )
+        logger.info(f"Auto-closed real trade: {trade['instrument']} {trade['direction']} "
+                    f"P&L=₹{pnl} (new capital=₹{new_capital})")
+    except Exception as e:
+        logger.warning(f"Auto-close real trade failed for signal_id={signal_id}: {e}")
 
 
 async def _scan_one_symbol(sym, meta, now, nifty_dir, bnifty_dir, expiry_close,
@@ -259,6 +349,7 @@ async def _scan_one_symbol(sym, meta, now, nifty_dir, bnifty_dir, expiry_close,
                 logger.info(f"Duplicate signal caught at DB level for {sym}, skipped")
                 return False
             logger.info(f"Signal: {sym} [{ac}] {sig.direction} @ {sig.entry}")
+            await _auto_open_real_trade(sig_d, sid)
             return True
         except Exception as e:
             logger.exception(f"Signal scan failed for {sym}: {e}")
@@ -405,6 +496,7 @@ async def _auto_close_open_signals():
                 )
                 logger.info(f"Auto-closed {sym} {doc['direction']}: {result['outcome']} "
                            f"@ {result['exit_price']} (R={result['r_multiple']})")
+                await _auto_close_real_trade(doc["id"], result["exit_price"], now.isoformat())
                 continue
 
             # End-of-day forced square-off for INTRADAY calls that hit
@@ -433,6 +525,8 @@ async def _auto_close_open_signals():
                     }},
                 )
                 logger.info(f"EOD square-off {sym} {doc['direction']}: {outcome} @ {last_close}")
+                await _auto_close_real_trade(doc["id"], last_close, now.isoformat(),
+                                              notes="EOD square-off")
                 continue
 
             # BTST max-hold: if neither SL nor target hit within
@@ -459,6 +553,8 @@ async def _auto_close_open_signals():
                         }},
                     )
                     logger.info(f"BTST max-hold closed {sym} {doc['direction']}: {outcome} @ {last_close}")
+                    await _auto_close_real_trade(doc["id"], last_close, now.isoformat(),
+                                                  notes=f"BTST max hold ({BTST_MAX_HOLD_DAYS}d) reached")
         except Exception as e:
             logger.warning(f"Auto-close check failed for {sym}: {e}")
 
