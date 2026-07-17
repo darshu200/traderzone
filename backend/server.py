@@ -480,13 +480,13 @@ async def _on_startup():
     # (London 08:00 IST-equivalents range 12:30-13:30; overlap ends up to 22:30 IST in winter DST).
     scheduler.add_job(
         run_signal_scan,
-        CronTrigger(day_of_week="mon-fri", hour="9-23", minute="*/2"),
+        CronTrigger(day_of_week="mon-fri", hour="9-23", minute="*/2", timezone=IST),
         id="weekday_scan", replace_existing=True,
     )
     # Saturday early morning: NY session tail after Friday close (up to ~04:00 IST in winter DST)
     scheduler.add_job(
         run_signal_scan,
-        CronTrigger(day_of_week="sat", hour="0-4", minute="*/2"),
+        CronTrigger(day_of_week="sat", hour="0-4", minute="*/2", timezone=IST),
         id="sat_forex_tail", replace_existing=True,
     )
     # Sunday-open covers: forex reopens Sun 17:00 America/New_York which is
@@ -495,7 +495,7 @@ async def _on_startup():
     # a scheduler tick alive here lets stale-flag / cache-warm logic run.
     scheduler.add_job(
         run_signal_scan,
-        CronTrigger(day_of_week="sun,mon", hour="2-8", minute="*/2"),
+        CronTrigger(day_of_week="sun,mon", hour="2-8", minute="*/2", timezone=IST),
         id="sun_open_tail", replace_existing=True,
     )
     # Auto-close: checks every OPEN signal against real price action and
@@ -503,17 +503,17 @@ async def _on_startup():
     # relying on manual end-of-day closing.
     scheduler.add_job(
         _auto_close_open_signals,
-        CronTrigger(day_of_week="mon-fri", hour="9-23", minute="*/2"),
+        CronTrigger(day_of_week="mon-fri", hour="9-23", minute="*/2", timezone=IST),
         id="auto_close_weekday", replace_existing=True,
     )
     scheduler.add_job(
         _auto_close_open_signals,
-        CronTrigger(day_of_week="sat", hour="0-4", minute="*/2"),
+        CronTrigger(day_of_week="sat", hour="0-4", minute="*/2", timezone=IST),
         id="auto_close_sat", replace_existing=True,
     )
     scheduler.add_job(
         _auto_close_open_signals,
-        CronTrigger(day_of_week="sun,mon", hour="2-8", minute="*/2"),
+        CronTrigger(day_of_week="sun,mon", hour="2-8", minute="*/2", timezone=IST),
         id="auto_close_sun", replace_existing=True,
     )
     await ensure_archive_indexes(db)
@@ -534,7 +534,7 @@ async def _on_startup():
     # close (15:30) and the latest forex overlap end (~22:30 in winter DST).
     scheduler.add_job(
         _run_daily_archive_job,
-        CronTrigger(hour=23, minute=55),
+        CronTrigger(hour=23, minute=55, timezone=IST),
         id="daily_candle_archive", replace_existing=True,
     )
     scheduler.start()
