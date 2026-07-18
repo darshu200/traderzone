@@ -304,22 +304,37 @@ async def _scan_one_symbol(sym, meta, now, nifty_dir, bnifty_dir, expiry_close,
                 logger.warning(f"Signal REJECTED (stale): {sym} entry_ts={sig_d['timestamp']} "
                                f"was {staleness_min:.1f} min old at detection time {now.isoformat()}")
                 try:
-                    await db.rejected_signals.insert_one({
-                        "instrument": sym, "asset_class": ac,
-                        "direction": sig_d.get("direction"),
-                        "setup_type": sig_d.get("setup_type"),
-                        "would_be_entry": sig_d.get("entry"),
-                        "would_be_stoploss": sig_d.get("stoploss"),
-                        "would_be_target": sig_d.get("target"),
-                        "rr_tier": sig_d.get("rr_tier"),
-                        "structural_start_ts": sig_d.get("structural_start_ts"),
-                        "entry_ts": sig_d.get("timestamp"),
-                        "staleness_min": round(staleness_min, 1),
-                        "confirm_span_min": round(confirm_span_min, 1) if confirm_span_min is not None else None,
-                        "detected_at": now.isoformat(),
-                        "trade_date": today_key,
-                        "reason": "stale",
-                    })
+                    # Same underlying setup (same instrument/direction/entry_ts)
+                    # gets re-detected on every 2-min tick for as long as it
+                    # stays stale — without this guard that produced one
+                    # rejected_signals row per tick (8+ duplicate rows for a
+                    # single stale setup, inflating "Missed (too stale)").
+                    # Upsert on the setup's identity instead: first sighting
+                    # creates the row, every later tick just refreshes
+                    # staleness_min/detected_at on that same row.
+                    await db.rejected_signals.update_one(
+                        {
+                            "instrument": sym, "direction": sig_d.get("direction"),
+                            "trade_date": today_key, "entry_ts": sig_d.get("timestamp"),
+                        },
+                        {"$set": {
+                            "instrument": sym, "asset_class": ac,
+                            "direction": sig_d.get("direction"),
+                            "setup_type": sig_d.get("setup_type"),
+                            "would_be_entry": sig_d.get("entry"),
+                            "would_be_stoploss": sig_d.get("stoploss"),
+                            "would_be_target": sig_d.get("target"),
+                            "rr_tier": sig_d.get("rr_tier"),
+                            "structural_start_ts": sig_d.get("structural_start_ts"),
+                            "entry_ts": sig_d.get("timestamp"),
+                            "staleness_min": round(staleness_min, 1),
+                            "confirm_span_min": round(confirm_span_min, 1) if confirm_span_min is not None else None,
+                            "detected_at": now.isoformat(),
+                            "trade_date": today_key,
+                            "reason": "stale",
+                        }},
+                        upsert=True,
+                    )
                 except Exception as e:
                     logger.warning(f"Could not persist rejected signal for {sym}: {e}")
                 return False
