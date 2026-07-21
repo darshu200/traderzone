@@ -18,6 +18,10 @@ export const getRejectedSignals = (asset_class) =>
     api.get("/signals/rejected", { params: asset_class && asset_class !== "ALL" ? { asset_class } : {} })
        .then(r => r.data)
        .catch(() => null);
+export const getChart = (symbol) =>
+    api.get(`/chart/${symbol}`)
+       .then(r => r.data)
+       .catch(() => null); // 404 = symbol isn't approaching/open right now, not an error
 export const getSettings      = () => api.get("/settings").then(r => r.data);
 export const updateSettings   = (body) => api.put("/settings", body).then(r => r.data);
 export const runBacktest      = (body) => api.post("/backtest", body).then(r => r.data);
