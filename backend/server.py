@@ -372,6 +372,24 @@ async def _scan_one_symbol(sym, meta, now, nifty_dir, bnifty_dir, expiry_close,
             return False
 
 
+def _df_to_chart_candles(df, limit: int = 100) -> list:
+    """Trim to the recent window that actually matters for understanding a
+    setup — the swing/BOS candle plus everything since — rather than full
+    history. Keeps the cached payload and the chart itself lightweight.
+    Times are unix seconds, the format lightweight-charts expects."""
+    tail = df.tail(limit)
+    out = []
+    for ts, row in tail.iterrows():
+        out.append({
+            "time": int(ts.timestamp()),
+            "open": round(float(row["Open"]), 4),
+            "high": round(float(row["High"]), 4),
+            "low": round(float(row["Low"]), 4),
+            "close": round(float(row["Close"]), 4),
+        })
+    return out
+
+
 async def _refresh_watchlist_cache(active: List[str]):
     """Computes the same per-symbol row /api/watchlist used to compute live,
     on every single frontend request (get_live_quote + fetch_candles + the
@@ -383,6 +401,11 @@ async def _refresh_watchlist_cache(active: List[str]):
     dashboard load — not backend sleep, not network — it was re-doing (on
     every page view) almost the same fetch work the 2-min cron already
     does, but serially blocking the HTTP response until all of it finished.
+
+    Also piggybacks the chart cache (db.chart_cache) on this same df15 fetch
+    for symbols that are either approaching a setup or have an OPEN signal
+    right now — this is the ONLY place chart data is built, so charts never
+    trigger a separate yfinance/NSE call beyond what this tick already does.
     """
     from strategy import find_swings, atr as _atr
 
@@ -390,20 +413,36 @@ async def _refresh_watchlist_cache(active: List[str]):
         meta = INSTRUMENTS[sym]
         q = get_live_quote(sym) or {"ltp": 0, "change": 0, "pct": 0, "source": "unavailable"}
         approaching = False
+        chart_doc = None
         try:
             df15 = fetch_candles(sym, "15m", period="3d")
             if df15 is not None and len(df15) >= 30:
                 sh, sl = find_swings(df15, 3, 3)
                 a = _atr(df15).iloc[-1]
                 last_c = df15["Close"].iloc[-1]
+                swing_info = None
                 if sh:
                     lvl = df15["High"].iloc[sh[-1]]
                     if abs(lvl - last_c) <= 0.5 * a:
                         approaching = True
+                        swing_info = {"price": round(float(lvl), 4),
+                                      "time": int(df15.index[sh[-1]].timestamp()), "type": "high"}
                 if not approaching and sl:
                     lvl = df15["Low"].iloc[sl[-1]]
                     if abs(lvl - last_c) <= 0.5 * a:
                         approaching = True
+                        swing_info = {"price": round(float(lvl), 4),
+                                      "time": int(df15.index[sl[-1]].timestamp()), "type": "low"}
+
+                if approaching:
+                    chart_doc = {
+                        "_id": sym, "symbol": sym, "status": "approaching",
+                        "candles": _df_to_chart_candles(df15),
+                        "swing": swing_info,
+                        "entry": None, "stoploss": None, "target": None,
+                        "direction": None, "trigger_time": None,
+                        "cached_at": _now_ist().isoformat(),
+                    }
         except Exception:
             pass
         return {
@@ -414,21 +453,75 @@ async def _refresh_watchlist_cache(active: List[str]):
             "ltp": q.get("ltp"), "change": q.get("change"), "pct": q.get("pct"),
             "source": q.get("source"), "approaching_setup": approaching,
             "cached_at": _now_ist().isoformat(),
-        }
+        }, chart_doc
 
     async def _row_bounded(s):
         async with _SCAN_CONCURRENCY:
             return await asyncio.to_thread(_row, s)
 
-    rows = await asyncio.gather(*[_row_bounded(s) for s in active], return_exceptions=True)
-    for r in rows:
-        if isinstance(r, Exception):
-            logger.warning(f"watchlist cache refresh failed for one symbol: {r}")
+    results = await asyncio.gather(*[_row_bounded(s) for s in active], return_exceptions=True)
+    keep_chart_symbols = set()
+    for res in results:
+        if isinstance(res, Exception):
+            logger.warning(f"watchlist cache refresh failed for one symbol: {res}")
             continue
+        r, chart_doc = res
         try:
             await db.watchlist_cache.replace_one({"_id": r["_id"]}, r, upsert=True)
         except Exception as e:
             logger.warning(f"watchlist cache upsert failed for {r.get('symbol')}: {e}")
+        if chart_doc:
+            try:
+                await db.chart_cache.replace_one({"_id": chart_doc["_id"]}, chart_doc, upsert=True)
+                keep_chart_symbols.add(chart_doc["_id"])
+            except Exception as e:
+                logger.warning(f"chart cache upsert failed for {chart_doc.get('symbol')}: {e}")
+
+    # Open signals get their chart built from the exact entry/SL/target/
+    # trigger-candle that's already stored on the signal doc — no need to
+    # recompute swings, and this keeps the chart showing the ORIGINAL setup
+    # even if price action since then would compute a different swing.
+    try:
+        open_sigs = await db.signals.find({"outcome": "OPEN"}, {"_id": 0}).to_list(200)
+    except Exception as e:
+        logger.warning(f"could not load open signals for chart cache: {e}")
+        open_sigs = []
+
+    for doc in open_sigs:
+        sym = doc.get("instrument")
+        if not sym or sym not in active:
+            continue
+        try:
+            df15 = await asyncio.to_thread(fetch_candles, sym, "15m", period="3d")
+            if df15 is None or len(df15) < 5:
+                continue
+            trigger_time = None
+            struct_ts = doc.get("structural_start_ts")
+            if struct_ts:
+                try:
+                    trigger_time = int(datetime.fromisoformat(struct_ts).timestamp())
+                except Exception:
+                    trigger_time = None
+            chart_doc = {
+                "_id": sym, "symbol": sym, "status": "open",
+                "candles": _df_to_chart_candles(df15),
+                "swing": None,
+                "entry": doc.get("entry"), "stoploss": doc.get("stoploss"),
+                "target": doc.get("target"), "direction": doc.get("direction"),
+                "trigger_time": trigger_time,
+                "cached_at": _now_ist().isoformat(),
+            }
+            await db.chart_cache.replace_one({"_id": sym}, chart_doc, upsert=True)
+            keep_chart_symbols.add(sym)
+        except Exception as e:
+            logger.warning(f"chart cache build failed for open signal {sym}: {e}")
+
+    # Drop stale chart entries for symbols no longer approaching/open, so the
+    # frontend never shows a chart for something that's neither anymore.
+    try:
+        await db.chart_cache.delete_many({"_id": {"$nin": list(keep_chart_symbols)}})
+    except Exception as e:
+        logger.warning(f"chart cache cleanup failed: {e}")
 
 
 async def run_signal_scan():
@@ -730,6 +823,19 @@ async def list_instruments(asset_class: Optional[str] = None):
     if asset_class in ("EQUITY", "FOREX"):
         items = [i for i in items if i["asset_class"] == asset_class]
     return items
+
+
+@api.get("/chart/{symbol}")
+async def get_chart(symbol: str):
+    """Reads the chart cache built by _refresh_watchlist_cache on the same
+    df15 the 2-min scan already fetches — no extra yfinance/NSE call here,
+    just a Mongo lookup. Only populated for symbols currently approaching a
+    setup or with an OPEN signal; anything else returns 404 by design, since
+    there's nothing meaningful to chart for it right now."""
+    doc = await db.chart_cache.find_one({"_id": symbol.upper()}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="No chart data for this symbol right now")
+    return doc
 
 
 @api.get("/watchlist")
