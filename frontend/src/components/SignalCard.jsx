@@ -1,8 +1,11 @@
+import { useState } from "react";
 import { fmtNum, fmtTimeIST } from "@/lib/format";
 import { INSTRUMENT_META } from "@/lib/api";
-import { Target, ShieldCheck, ArrowUpRight, ArrowDownRight, Warning } from "@phosphor-icons/react";
+import { Target, ShieldCheck, ArrowUpRight, ArrowDownRight, Warning, ChartLine } from "@phosphor-icons/react";
+import SetupChart from "@/components/SetupChart";
 
 export default function SignalCard({ signal, onClose }) {
+    const [showChart, setShowChart] = useState(false);
     const isLong = signal.direction === "LONG";
     const badgeClass = isLong ? "ts-badge-long" : "ts-badge-short";
     const Arrow = isLong ? ArrowUpRight : ArrowDownRight;
@@ -10,6 +13,7 @@ export default function SignalCard({ signal, onClose }) {
     const meta = INSTRUMENT_META[signal.instrument] || { pip: 2, prefix: "₹" };
     const pfx = meta.prefix;
     const dp = meta.pip;
+    const isOpen = (signal.outcome || "OPEN") === "OPEN";
 
     return (
         <div
@@ -79,6 +83,15 @@ export default function SignalCard({ signal, onClose }) {
                     <span className={`ts-badge-neutral`} data-testid={`signal-outcome-${signal.id}`}>
                         {signal.outcome || "OPEN"}
                     </span>
+                    {isOpen && (
+                        <button
+                            data-testid={`chart-toggle-${signal.id}`}
+                            onClick={() => setShowChart(v => !v)}
+                            className="ts-btn-ghost !py-1 !px-2 !text-[10px] flex items-center gap-1"
+                        >
+                            <ChartLine size={11} /> Chart
+                        </button>
+                    )}
                     {onClose && signal.outcome === "OPEN" && (
                         <button
                             data-testid={`close-trade-${signal.id}`}
@@ -90,6 +103,8 @@ export default function SignalCard({ signal, onClose }) {
                     )}
                 </div>
             </div>
+
+            {isOpen && showChart && <SetupChart symbol={signal.instrument} />}
         </div>
     );
 }
